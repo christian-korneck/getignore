@@ -1,0 +1,348 @@
+name: Release
+on:
+  push:
+    # Sequence of patterns matched against refs/tags
+    tags:
+      - 'v*' # Push events to matching v*, i.e. v1.0, v20.15.10
+
+jobs:
+  pre:
+   name: pre
+   runs-on: ubuntu-latest
+   steps:
+     - name: pre1
+       run: |
+         env
+         exit 0
+
+  test:
+   name: test
+   runs-on: ubuntu-latest
+   steps:
+
+    - name: Set up Go 1.16
+      uses: actions/setup-go@v2
+      with:
+        go-version: 1.16
+
+    - name: Check out code into the Go module directory
+      uses: actions/checkout@v2
+
+    - name: Get dependencies
+      env:
+        CGO_ENABLED: 0
+      run: |
+        go get -v -t -d .
+        
+    - name: Test
+      run: go test ./...
+
+
+       
+  cr_release:
+    name: create_release
+    needs: [pre, test] #don't create a release too early
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check out code for changelog creation
+      uses: actions/checkout@v2
+      with:
+        fetch-depth: 0 #otherwise only one commit is fetched
+    - name: Create Changelog
+      id: create_changelog
+      run: |
+        git fetch --tags
+        git tag #for debug
+        git log --oneline #for debug
+        previousTag=$(git tag --sort=-v:refname | head -2 | tail -1)
+        echo previous tag: $previousTag #for debug
+        changelog=$(git log --oneline --pretty="%s" $previousTag..HEAD)
+        echo changelog1: "$changelog" #for debug
+        changelog=$(echo "$changelog" | sed 's/^/- /')
+        echo changelog2: "$changelog" #for debug
+        echo changes since $previousTag: > ./changelog.md
+        echo "$changelog" >> ./changelog.md
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # token provided by Actions, no need to set it
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        draft: true #we'll undraft at the end if the build step was successfull (= all assets uploaded to the release)
+        prerelease: false
+        body_path: ./changelog.md
+    - name: Output Release URL File
+      run: echo "${{ steps.create_release.outputs.upload_url }}" > release_url.txt
+    - name: Save Release URL File for publish
+      uses: actions/upload-artifact@v1
+      with:
+        name: release_url
+        path: ./release_url.txt
+    - name: Output Release ID File
+      run: echo "${{ steps.create_release.outputs.id }}" > release_id.txt
+    - name: Save Release ID File for publish
+      uses: actions/upload-artifact@v1
+      with:
+        name: release_id
+        path: ./release_id.txt
+        
+  build:
+    needs: [cr_release]
+    strategy:
+      matrix:
+        os: [linux, darwin, windows]
+        arch: [amd64, 386, arm64, arm]
+        exclude:
+          - os: windows
+            arch: arm64
+          - os: windows
+            arch: arm
+          - os: darwin
+            arch: arm
+          - os: darwin
+            arch: 386
+        include:
+          - os: windows
+            file_extension: '.exe'
+          - os: windows
+            ci_image: ubuntu-latest
+          - os: linux
+            file_extension: ''
+          - os: linux
+            ci_image: ubuntu-latest
+          - os: darwin
+            file_extension: ''
+          - os: darwin
+            #ci_image: macos-11.0
+            # macos-11.0 used to be available has been transitioned into private beta :(
+            # https://github.com/actions/virtual-environments/issues/2486
+            ci_image: macos-latest 
+          - os: darwin
+            no_upx: true
+
+    name: Build
+    runs-on: ${{ matrix.ci_image }}
+    env: 
+      GOOS: ${{ matrix.os }}
+      GOARCH: ${{ matrix.arch }}
+    steps:
+
+    - name: Set up Go 1.16
+      uses: actions/setup-go@v2
+      with:
+        go-version: 1.16
+      id: go
+
+    - name: Check out code into the Go module directory
+      uses: actions/checkout@v2
+
+    - name: Get dependencies
+      env:
+        GOOS: ${{ matrix.os }}
+        GOARCH: ${{ matrix.arch }}
+        CGO_ENABLED: 0
+      run: |
+        go get -v -t -d .
+
+    - name: Build
+      run: go build -v -a -tags netgo -ldflags='-s -w -extldflags "-static"' .
+
+    - name: compress with upx
+      if: ${{ matrix.no_upx != true }}
+      run: sudo apt-get -y update && sudo apt-get -y install upx && upx ./getignore${{ matrix.file_extension }}
+
+    - name: Import darwin code-signing certificates
+      if: ${{ matrix.os == 'darwin' }}
+      uses: Apple-Actions/import-codesign-certs@v1
+      with:
+        p12-file-base64: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_P12_BASE64 }} #dev id cert as b64
+        p12-password: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_PASSWORD }} #pw for cert
+
+    - name: Sign darwin binary with Gon
+      if: ${{ matrix.os == 'darwin' }}
+      env:
+        AC_USERNAME: ${{ secrets.AC_USERNAME }} #apple id
+        AC_PASSWORD: ${{ secrets.AC_PASSWORD }} #app specific pw for apple id
+      run: |
+        brew tap mitchellh/gon
+        brew install mitchellh/gon/gon
+        gon -log-level=debug -log-json ./gon.json
+        rm -f ./getignore
+        unzip getignore
+    - name: Upload artifact
+      uses: actions/upload-artifact@v1
+      with:
+        name: getignore_${{ matrix.os }}_${{ matrix.arch }}${{ matrix.file_extension }}
+        path: ./getignore${{ matrix.file_extension }}
+
+    - name: Load Release URL File from release job
+      uses: actions/download-artifact@v1
+      with:
+          name: release_url
+    - name: Get Release File Name & Upload URL
+      id: get_release_info
+      run: |
+        value=`cat release_url/release_url.txt`
+        echo ::set-output name=upload_url::$value
+    - name: Upload Release Asset
+      id: upload-release-asset
+      uses: actions/upload-release-asset@v1.0.1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.get_release_info.outputs.upload_url }} # references get_release_info step above
+        asset_name: getignore_${{ matrix.os }}_${{ matrix.arch }}${{ matrix.file_extension }}
+        asset_path: ./getignore${{ matrix.file_extension }}
+        asset_content_type: application/octet-stream
+  
+  cr_darwin_universal_binary:
+    needs: [build]
+    # macos-11.0 used to be available has been transitioned into private beta :(
+    # https://github.com/actions/virtual-environments/issues/2486
+    #runs-on: macos-11.0
+    runs-on: macos-latest
+    steps:
+
+    - name: Check out code
+      uses: actions/checkout@v2
+
+    - name: Download darwin_amd64 artifact
+      uses: actions/download-artifact@v1
+      with:
+          name: getignore_darwin_amd64
+    
+    - name: Download darwin_arm64 artifact
+      uses: actions/download-artifact@v1
+      with:
+          name: getignore_darwin_arm64
+    
+    - name: package darwin universal binary
+      run: |
+        lipo -create getignore_darwin_arm64/getignore getignore_darwin_amd64/getignore -output getignore
+    
+    - name: Import darwin code-signing certificates
+      uses: Apple-Actions/import-codesign-certs@v1
+      with:
+        p12-file-base64: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_P12_BASE64 }} #Apple Dev ID cert as b64
+        p12-password: ${{ secrets.APPLE_DEVELOPER_CERTIFICATE_PASSWORD }} #pw for cert
+
+    - name: Sign darwin binary with Gon
+      env:
+        AC_USERNAME: ${{ secrets.AC_USERNAME }} #apple id
+        AC_PASSWORD: ${{ secrets.AC_PASSWORD }} #app specific pw for apple id
+      run: |
+        brew tap mitchellh/gon
+        brew install mitchellh/gon/gon
+        gon -log-level=debug -log-json ./gon.json
+        rm -f ./getignore
+        unzip getignore
+    - name: Upload artifact
+      uses: actions/upload-artifact@v1
+      with:
+        name: getignore_darwin_universal2
+        path: ./getignore
+
+    - name: Load Release URL File from release job
+      uses: actions/download-artifact@v1
+      with:
+          name: release_url
+  
+    - name: Get Release File Name & Upload URL
+      id: get_release_info
+      run: |
+        value=`cat release_url/release_url.txt`
+        echo ::set-output name=upload_url::$value
+    - name: Upload Release Asset
+      id: upload-release-asset
+      uses: actions/upload-release-asset@v1.0.1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.get_release_info.outputs.upload_url }} # references get_release_info step above
+        asset_name: getignore_darwin_universal2
+        asset_path: ./getignore
+        asset_content_type: application/octet-stream
+
+  
+  build_containers:
+    #needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check out code
+      uses: actions/checkout@v2
+    - name: Split tag string into semantic version parts
+      id: semver
+      run: |
+        git fetch --tags
+        git tag #for debug
+        export vcur=$(git tag --sort=-v:refname | head -1 | sed 's/v//1')
+        export vmajor=$(echo $vcur | cut -d. -f1)
+        export vminor=$(echo $vcur | cut -d. -f2)
+        export vpatch=$(echo $vcur | cut -d. -f3)
+        echo ::set-output name=vcur::$vcur
+        echo ::set-output name=vmajor::$vmajor
+        echo ::set-output name=vminor::$vminor
+        echo ::set-output name=vpatch::$vpatch
+        echo version: $vcur
+        echo version major: $vmajor
+        echo version minor: $vminor
+        echo version patch: $vpatch
+    - name: Prepare docker-buildx
+      run: |
+        docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+        docker buildx create --name mybuilder
+        docker buildx ls #for debug
+        docker buildx inspect --bootstrap
+        docker buildx use mybuilder
+    - name: Docker login
+      env:
+        DOCKER_USER: chko
+        DOCKER_PASS: ${{ secrets.DOCKER_PASS }}
+      run: |
+        docker login -u "$DOCKER_USER" -p  "$DOCKER_PASS"
+    - name: Build and Push container images with docker-buildx
+      env:
+        vcur: ${{ steps.semver.outputs.vcur }}
+        vmajor: ${{ steps.semver.outputs.vmajor }}
+        vminor: ${{ steps.semver.outputs.vminor }}
+        vpatch: ${{ steps.semver.outputs.vpatch }}
+      run: |
+        docker buildx inspect #for debug
+        echo version: $ver - major: $vmajor - minor: $vminor - patch: $vpatch #for debug
+        destrepo=chko/getignore
+        docker buildx build -t "$destrepo:latest" -t "$destrepo:$vcur" -t "$destrepo:$vmajor" --platform linux/amd64,linux/386,linux/arm64,linux/arm/v7,linux/arm/v6 --push .
+        docker buildx stop
+    - name: Update container repo README
+      env:
+        #exact env var names for docker-pushrm
+        DOCKER_USER: chko
+        DOCKER_PASS: ${{ secrets.DOCKER_PASS }}
+      run: |
+        # download latest docker-pushrm release from github
+        # (because we keep the release that this workflow creates drafted until the end of the workflow run the version we're downloading is NOT the one we're currently releasing)
+        export FILENAME=docker-pushrm_linux_amd64 && export DESTDIR=. && DOWNLOAD_URL=$(curl --silent --fail --show-error https://api.github.com/repos/christian-korneck/docker-pushrm/releases/latest | jq -r ".assets | map(select(.name == \"$FILENAME\"))[0].browser_download_url") && curl --silent --fail --show-error -L $DOWNLOAD_URL -o "$DESTDIR/docker-pushrm" && chmod +rx "$DESTDIR/docker-pushrm"
+        # this automatically uses README.md
+        ./docker-pushrm --short "getignore - get gitignore templates quickly in the shell for a wide variety of languages" chko/getignore
+  undraft_release:
+    needs: [build, build_containers, cr_darwin_universal_binary] #only undraft the release when assets were uploaded
+    runs-on: ubuntu-latest
+    steps:
+    - name: Load Release ID File from release job
+      uses: actions/download-artifact@v1
+      with:
+          name: release_id
+    - name: Get Release ID
+      id: get_release_id_info
+      run: |
+        value=`cat release_id/release_id.txt`
+        echo ::set-output name=release_id::$value
+    - name: Undraft release
+      id: undraft_release
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        RELEASE_ID: ${{ steps.get_release_id_info.outputs.release_id }} # references other step
+      run: |
+        curl --verbose --fail --show-error --location --request PATCH "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" --header "Authorization: token $GITHUB_TOKEN" --header 'Content-Type: application/json' --header 'Accept: application/vnd.github.everest-preview+json' --data-raw '{"draft": false}'
+  
