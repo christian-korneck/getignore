@@ -37,7 +37,7 @@ import (
 
 // getignoreCmd represents the getignore command
 var getignoreCmd = &cobra.Command{
-	Use:     "[language ...]",
+	Use:     " [language ...]",
 	Aliases: []string{"getignore"},
 	Example: "getignore python go visualstudiocode >> .gitignore",
 	Short:   "print gitignore template for a language",
@@ -67,19 +67,11 @@ languages from the terminal.
 			log.Fatalf(err.Error())
 		}
 
-		if err != nil {
-			return err
-		}
-
 		if output == "" {
 			log.Warn("output is empty (probably not what you wanted?")
 		}
 
 		fmt.Println(output)
-
-		// if _, err := run(args); err != nil {
-		// 	return err
-		// }
 
 		return nil
 	},
