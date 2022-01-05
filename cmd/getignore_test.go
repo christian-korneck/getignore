@@ -117,10 +117,10 @@ dist/
 
 func TestRun(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		if req.URL.String() == "/repos/github/gitignore/git/trees/master?recursive=1" {
+		if req.URL.String() == "/repos/github/gitignore/git/trees/main?recursive=1" {
 			rw.Write([]byte(cannedTreeResponse))
 		}
-		if req.URL.String() == "/github/gitignore/master/Go.gitignore" {
+		if req.URL.String() == "/github/gitignore/main/Go.gitignore" {
 			rw.Write([]byte(cannedGitignore))
 		}
 	}))

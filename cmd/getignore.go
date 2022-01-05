@@ -122,7 +122,7 @@ func getPaths(baseurl string) (paths []string, err error) {
 		baseurl = "https://api.github.com"
 	}
 
-	url := fmt.Sprintf("%s/repos/github/gitignore/git/trees/master?recursive=1", baseurl)
+	url := fmt.Sprintf("%s/repos/github/gitignore/git/trees/main?recursive=1", baseurl)
 
 	resp, err := http.Get(url)
 	if err != nil {
@@ -216,7 +216,7 @@ func (rc *RestClient) Run(args []string) (output string, err error) {
 	}
 
 	for _, lang := range langs {
-		url := fmt.Sprintf("%s/github/gitignore/master/%s.gitignore", baseurl, lang)
+		url := fmt.Sprintf("%s/github/gitignore/main/%s.gitignore", baseurl, lang)
 
 		resp, err := http.Get(url)
 		if err != nil {
